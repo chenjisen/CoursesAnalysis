@@ -5,7 +5,7 @@ from selenium import webdriver
 from selenium.webdriver.support.ui import Select
 from bs4.element import Tag
 import csv
-
+import time
 
 class DataAttribute:
     name: str
@@ -26,25 +26,21 @@ class SpecialityAttribute(DataAttribute):
         self.year = year
 
 
-def get_driver(website):
-    driver = webdriver.Chrome()
-    driver.get(website)
-    return driver
-
-
 class Driver:
 
-    def __init__(self, driver=None, parent=None):
-        if parent:
-            self.driver = parent.driver
-        else:
-            self.driver = driver
+    def __init__(self, website):
+        self.driver = Driver.__get_driver(website)
+        self.website = website
         self.link_list = {}
-        self.handle = None
-        self.parent = parent
 
     def __del__(self):
         pass  # self.driver.quit()
+
+    @staticmethod
+    def __get_driver(website):
+        driver = webdriver.Chrome()
+        driver.get(website)
+        return driver
 
     def get_links(self):
         links = self.driver.find_elements_by_tag_name("a")
@@ -58,67 +54,25 @@ class Driver:
         self.click_link(data.href)
 
     def get_page(self):
-        self.handle = self.driver.current_window_handle
-        self.get_links()
+        # self.handle = self.driver.current_window_handle
         return self.driver.page_source
 
     def quit(self):
         self.driver.quit()
 
-    def click_by_data_and_go_forward_to_child(self, data):
-        self.click_data(data)
+    def go_forward(self):
         handles = self.driver.window_handles
         self.driver.switch_to.window(handles[-1])
-
-    def click_from_parent_by_data_and_go_forward_to_self(self, data):
-        self.parent.click_by_data_and_go_forward_to_child(data)
-
-    def close_child_and_come_back_to_self(self):
-        self.driver.close()
-        self.driver.switch_to.window(self.handle)
         self.get_links()
 
-    def close_self_and_come_back_to_parent(self):
-        self.parent.close_child_and_come_back_to_self()
-
-
-"""
-    默认层级：上海交通大学(SJTU)、第一专业(Major)、培养计划(Program) (忽略：第二专业(Minor))
-    忽略层级：学院(School)、专业类
-    层级：年度(Year)-专业(Speciality)-课程类(Category)  （专业方向视为不同的专业）
-    
-"""
-
-
-class SpecialityTableDriver(Driver):
-    program_type_options: List[str]
-
-    # 一专专业、专业类、专业方向一览表
-
-    def __init__(self, driver):
-        super(SpecialityTableDriver, self).__init__(driver=driver)
-
-        program_type = self.driver.find_element_by_id('dpJhlx')
-        enrollment_year = self.driver.find_element_by_id('dpRxnd')
-
-        self.program_type_options = []
-        program_type_list = program_type.find_elements_by_tag_name('option')
-        for option in program_type_list:
-            self.program_type_options.append(option.text)
-
-        self.enrollment_year_options = []
-        enrollment_year_list = enrollment_year.find_elements_by_tag_name('option')
-        for option in enrollment_year_list:
-            self.enrollment_year_options.append(option.text)
-
-        self.program_type = ''
-        self.enrollment_year = ''
+    def close_and_come_back(self):
+        self.driver.close()
+        handles = self.driver.window_handles
+        self.driver.switch_to.window(handles[-1])
+        self.get_links()
 
     def query_by_name(self, type_str, year_str):
-
-        self.program_type = type_str
-        self.enrollment_year = year_str
-
+        # SpecialityTableDriver
         program_type = self.driver.find_element_by_id('dpJhlx')
         program_type_select = Select(program_type)
 
@@ -131,32 +85,34 @@ class SpecialityTableDriver(Driver):
         enrollment_year_select.select_by_visible_text(year_str)
         button_query.click()
 
-    def crawl_by_type_and_year(self, type_str, year_str):
+        self.get_links()
 
-        self.query_by_name(type_str, year_str)
-        page = self.get_page()
+    def get_type_and_year(self):
+        # 一专专业、专业类、专业方向一览表
+        try:
+            program_type = self.driver.find_element_by_id('dpJhlx')
+            enrollment_year = self.driver.find_element_by_id('dpRxnd')
+            program_type_list = program_type.find_elements_by_tag_name('option')
+            enrollment_year_list = enrollment_year.find_elements_by_tag_name('option')
 
-        # with open('jspyjh.html', encoding='UTF-8') as file: page = file.read()
+            program_type_options = []
 
-        """
-            Process speciality table
-        """
+            for option in program_type_list:
+                program_type_options.append(option.text)
 
-        specialities = SpecialityTable(page, int(self.enrollment_year))
-        print('Speciality List: (The number of specialities: ', len(specialities.list), ')')
-        for speciality in specialities.list:
-            print(speciality.name, ' ', speciality.hierarchy)
+            enrollment_year_options = []
 
-        specialities.hierarchy_tree.dfs()
-        specialities.hierarchy_tree.bfs()
+            for option in enrollment_year_list:
+                enrollment_year_options.append(option.text)
 
-        """
-            Process speciality program course type List
-        """
+        except Exception as e:
+            print('Error: ', format(e), 'Retrying...')
+            time.sleep(5)
+            self.driver.refresh()
+            return self.get_type_and_year()
 
-        category_list_driver = CategoryListDriver(self.driver)
-        current_speciality: SpecialityAttribute = specialities.list[5]
-        category_list_driver.crawl_by_speciality(current_speciality)
+        else:
+            return [program_type_options, enrollment_year_options]
 
 
 class SpecialityTable:
@@ -211,34 +167,8 @@ class SpecialityTable:
                 current_node = current_node.parent
 
 
-class CategoryListDriver(Driver):
-    # 培养计划(培养目标、课程分列信息）
-
-    def __init__(self, speciality_table_driver):
-        super(CategoryListDriver, self).__init__(parent=speciality_table_driver)
-
-    def crawl_by_speciality(self, speciality):
-        self.click_from_parent_by_data_and_go_forward_to_self(speciality)
-
-        page = self.get_page()  # with open('PyjhQuery_Jb.html', encoding='UTF-8') as file: page = file.read()
-        course_categories = CategoryList(page)
-
-        for course_data in course_categories.list:
-            print(course_data.name, ' ', course_data.href)
-
-        course_table_driver = CourseTableDriver(self, speciality)
-
-        current_category = course_categories.list[2]
-        course_table_driver.crawl_by_category(current_category)
-
-        current_category = course_categories.list[6]
-        course_table_driver.crawl_by_category(current_category)
-
-        self.close_self_and_come_back_to_parent()
-
-
 class CategoryList:
-
+    # 培养计划(培养目标、课程分列信息）
     def __init__(self, page):
 
         page_soup = BeautifulSoup(page, 'html.parser')
@@ -251,27 +181,10 @@ class CategoryList:
             if name != '关闭' and name != '点击此处查看培养目标':
                 self.list.append(DataAttribute(name, href))
 
-
-class CourseTableDriver(Driver):
-    # 培养计划课程（按类别）
-
-    def __init__(self, category_list_driver, speciality):
-        super(CourseTableDriver, self).__init__(parent=category_list_driver)
-        self.speciality: SpecialityAttribute = speciality
-
-    def crawl_by_category(self, category):
-        self.click_from_parent_by_data_and_go_forward_to_self(category)
-        page = self.get_page()
-        courses = CourseTable(page)
-
-        file_name = self.speciality.name + '-' + str(self.speciality.year) + '-' + '.csv'
-
-        with open(file_name, 'w', newline='') as file:
-            writer = csv.writer(file)
-            writer.writerows(courses.list)
-
-        self.close_self_and_come_back_to_parent()
-
+def to_int(str):
+    if str == ' ':
+        return 0
+    return int(str)
 
 class Course:
     """
@@ -315,7 +228,7 @@ class Course:
         if len(td_list) != 13:
             raise Exception("Unexpected course data!")
 
-        self.number = int(td_list[0].get_text())
+        self.number = to_int(td_list[0].get_text())
 
         code_a = td_list[1].find('a')
         if code_a:
@@ -324,14 +237,14 @@ class Course:
             raise Exception('Unexpected course number!')
 
         self.name = td_list[2].get_text()
-        self.credit = int(td_list[3].get_text())
-        self.credit_hour = int(td_list[4].get_text())
-        self.lecture_hour = int(td_list[5].get_text())
-        self.experiment_hour = int(td_list[6].get_text())
-        self.practical_hour = int(td_list[7].get_text())
-        self.computer_hour = int(td_list[8].get_text())
-        self.design = int(td_list[9].get_text())
-        self.semester = int(td_list[10].get_text())
+        self.credit = to_int(td_list[3].get_text())
+        self.credit_hour = to_int(td_list[4].get_text())
+        self.lecture_hour = to_int(td_list[5].get_text())
+        self.experiment_hour = to_int(td_list[6].get_text())
+        self.practical_hour = to_int(td_list[7].get_text())
+        self.computer_hour = to_int(td_list[8].get_text())
+        self.design = to_int(td_list[9].get_text())
+        self.semester = to_int(td_list[10].get_text())
         self.attribute = td_list[11].get_text()
 
         module_a = td_list[12].find('a')
@@ -343,19 +256,32 @@ class Course:
         self.attrs_text = []
 
         for td in td_list:
-            self.attrs_text.append(td.get_text())
+            text = td.get_text()
+            if text == '\xa0':
+                text = ''
+            self.attrs_text.append(text)
 
 
 class CourseTable:
+    # 培养计划课程（按类别）
     def __init__(self, page):
         page_soup = BeautifulSoup(page, 'html.parser')
         self.table = page_soup.find('table', id='DataGrid1')
-        self.list = []
+        self.course_list = []
+        self.course_str_list = []
 
         if self.table:
-            for tr in self.table.find_all('tr'):
-                current_course = Course(tr)
-                self.list.append(current_course)
+            tr: Tag
+            for i, tr in enumerate(self.table.find_all('tr')):
+                if i == 0:
+                    if tr.get_text() != '\n序号课程代码课程名称学分学时讲课实验实践上机课程设计开课学期课程性质课程模块\n':
+                        print(tr.get_text())
+                        raise Exception('Unexpected course number!')
+                else:
+                    current_course = Course(tr)
+                    self.course_list.append(current_course)
+                    self.course_str_list.append(current_course.attrs_text)
+
         else:
             self.table = page_soup.find('table', id='DataGrid2')
 
@@ -403,12 +329,96 @@ class TreeNode:
 WEBSITE = 'http://electsys.sjtu.edu.cn/edu/pyjh/pyjhQueryNew.aspx'
 LOCAL_WEBSITE = 'file:///C:/Users/C/PycharmProjects/CoursesAnalysis/jspyjh_2016.html'
 
-main_driver = get_driver(WEBSITE)  # web_driver = get_driver(LOCAL_WEBSITE)
-main_speciality_table_driver = SpecialityTableDriver(main_driver)
+primal_driver = Driver(WEBSITE)
 
-main_speciality_table_driver.crawl_by_type_and_year(
-    main_speciality_table_driver.program_type_options[0],
-    main_speciality_table_driver.enrollment_year_options[3]
-)
+"""
+    默认层级：上海交通大学(SJTU)、第一专业(Major)、培养计划(Program) (忽略：第二专业(Minor))
+    忽略层级：学院(School)、专业类
+    层级：年度(Year)-专业(Speciality)-课程类(Category)  （专业方向视为不同的专业）
+
+"""
+
+[program_type_options, enrollment_year_options] = primal_driver.get_type_and_year()
+
+type_str = program_type_options[0]
+
+for i1 in [3]:
+
+    """
+        Level：year
+        Task: get speciality list
+    """
+
+    year_str = enrollment_year_options[i1]
+    year = int(year_str)
+    primal_driver.query_by_name(type_str, year_str)
+    page = primal_driver.get_page()  # with open('jspyjh.html', encoding='UTF-8') as file: page = file.read()
+
+    specialities = SpecialityTable(page, year)
+
+    print('Speciality List: (The number of specialities: ', len(specialities.list), ')')
+    for speciality in specialities.list:
+        print(speciality.name, ' ', speciality.hierarchy)
+    specialities.hierarchy_tree.dfs()
+    specialities.hierarchy_tree.bfs()
+
+    for i2 in [5]:
+
+        """
+            Level: speciality
+            Task: get category list
+        """
+
+        current_speciality: SpecialityAttribute = specialities.list[i2]
+        primal_driver.click_data(current_speciality)
+        primal_driver.go_forward()
+        page = primal_driver.get_page()  # with open('PyjhQuery_Jb.html', encoding='UTF-8') as file: page = file.read()
+
+        course_categories = CategoryList(page)
+
+        for course_data in course_categories.list:
+            print(course_data.name, ' ', course_data.href)
+
+        for i3 in [2, 6]:
+
+            """
+                Level: category
+                Task: get course list
+            """
+
+            current_category = course_categories.list[i3]
+            file_name = current_speciality.name\
+                        + '-' + str(current_speciality.year) \
+                        + '-' + str(current_category.name) \
+                        + '.csv'
+            primal_driver.click_data(current_category)
+            primal_driver.go_forward()
+            page = primal_driver.get_page()
+
+            courses = CourseTable(page)
+
+            print(courses.table.get_text())
+
+            if courses.course_str_list:
+                with open(file_name, 'w', newline='') as file:
+                    writer = csv.writer(file)
+                    writer.writerows(courses.course_str_list)
+
+            primal_driver.close_and_come_back()
+
+        primal_driver.close_and_come_back()
+
 
 # web_driver.quit()
+
+
+'''primal_driver = Driver('file:///C:/Users/C/PycharmProjects/CoursesAnalysis/PyjhQuery_Fl.html')
+page = primal_driver.get_page()
+courses = CourseTable(page)
+
+print(courses.table.get_text())
+
+if courses.course_str_list:
+    with open('test.csv', 'w', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerows(courses.course_str_list)'''
