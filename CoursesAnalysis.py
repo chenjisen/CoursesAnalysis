@@ -6,6 +6,7 @@ from selenium.webdriver.support.ui import Select
 from bs4.element import Tag
 import csv
 import time
+import threading
 
 
 class DataOnPage:
@@ -21,10 +22,9 @@ class SpecialityOnPage(DataOnPage):
     year: int
     hierarchy: List[str]
 
-    def __init__(self, name, year, href, hierarchy=None):
+    def __init__(self, name, year, href, hierarchy):
         super(SpecialityOnPage, self).__init__(name, href)
-        if hierarchy:
-            self.hierarchy = hierarchy.copy()
+        self.hierarchy = hierarchy.copy()
         self.year = year
 
 
@@ -34,6 +34,7 @@ class Driver:
         self.driver = Driver.__get_driver(website)
         self.website = website
         self.link_list = {}
+        self.is_loaded_successfully = False
 
     def __del__(self):
         pass  # self.driver.quit()
@@ -64,7 +65,11 @@ class Driver:
         self.click_link(data.href)
         handles = self.driver.window_handles
         self.driver.switch_to.window(handles[-1])
+
+        # loading may fail
+        self.is_loaded_successfully = False
         self.get_links()
+        self.is_loaded_successfully = True
 
     def get_page(self):
         # self.handle = self.driver.current_window_handle
@@ -81,19 +86,26 @@ class Driver:
 
     def query_by_name(self, type_str, year_str):
         # SpecialityTableDriver
-        program_type = self.driver.find_element_by_id('dpJhlx')
-        program_type_select = Select(program_type)
+        try:
+            program_type = self.driver.find_element_by_id('dpJhlx')
+            program_type_select = Select(program_type)
 
-        enrollment_year = self.driver.find_element_by_id('dpRxnd')
-        enrollment_year_select = Select(enrollment_year)
+            enrollment_year = self.driver.find_element_by_id('dpRxnd')
+            enrollment_year_select = Select(enrollment_year)
 
-        button_query = self.driver.find_element_by_id('btnQuery')
+            button_query = self.driver.find_element_by_id('btnQuery')
 
-        program_type_select.select_by_visible_text(type_str)
-        enrollment_year_select.select_by_visible_text(year_str)
-        button_query.click()
+            program_type_select.select_by_visible_text(type_str)
+            enrollment_year_select.select_by_visible_text(year_str)
+            button_query.click()
 
-        self.get_links()
+            self.get_links()
+
+        except Exception as e:
+            print('Error: ', format(e), 'Retrying...')
+            time.sleep(5)
+            self.driver.refresh()
+            self.query_by_name(type_str, year_str)
 
     def get_type_and_year(self):
         # 一专专业、专业类、专业方向一览表
@@ -124,6 +136,7 @@ class Driver:
 
 
 class SpecialityTable:
+    list: List[SpecialityOnPage]
 
     def __init__(self, page, year):
 
@@ -338,73 +351,192 @@ class SpecialityInfo:
     year: int
     name: str
     url: str
+    label: str
+    info_list: List[str]
 
     def __init__(self, year, name, url):
         self.year = year
         self.name = name
         self.url = url
-        self.label = str(self.year) + self.name
+        self.label = str(year) + name
+        self.info_list = [str(year), name, url, get_date_time()]
 
 
-class SpecialityState:
-    # url: str
-    speciality: SpecialityInfo
-    date_time: str
-
-    # is_completed: bool
-
-    def __init__(self, info: SpecialityInfo):
-        self.speciality = info
-        self.date_time = time.strftime("%Y-%m-%d,%H:%M:%S", time.localtime())
-        # self.is_completed = bool(str_is_completed)
-
-    def to_str(self):
-        return self.speciality.label \
-               + ' ' + self.speciality.url \
-               + ' ' + self.date_time + '\n'
+def get_date_time():
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
 
-class StateDict:
+class InfoFile:
+    _file: TextIO
+
+    def __del__(self):
+        self._file.close()
+
+
+class SpecialityFile(InfoFile):
+    dict: Dict[str, SpecialityInfo]
+
+    # Complete file:
     # record the state which speciality is crawled
     # only consider major
     # str format: [year + name] : url time
 
-    dict: Dict[str, SpecialityState]
-    file: TextIO
+    # Failure file:
+    # str format: year, name, url
 
     def __init__(self, file_name):
+        self._file = open(file_name, 'a+', newline='')
         self.dict = {}
-        self.file = open(file_name, 'r+')
-        for line in self.file.readlines():
-            # format: year+name url datetime
-            args = line.split()
-            year = int(args[0][:4])
-            name = args[0][4:]
-            url = args[1]
-            info = SpecialityInfo(year, name, url)
-            state = SpecialityState(info)
-            self.dict.setdefault(info.label, state)
+        self._file.seek(0)
+        lines = csv.reader(self._file)
 
-    def add(self, speciality: SpecialityOnPage, url):
-        info = SpecialityInfo(speciality.year, speciality.name, url)
-        state = SpecialityState(info)
-        self.dict.setdefault(info.label, state)
-        self.file.write(state.to_str())
+        for line in lines:
+            # format: year name url datetime
+            year = int(line[0])
+            name = line[1]
+            url = line[2]
+            info = SpecialityInfo(year, name, url)
+            self.dict.setdefault(info.label, info)
+
+        """year = int(line[0][:4])
+            name = line[0][4:]"""
+
+    def add(self, info: SpecialityInfo):
+        self.dict.setdefault(info.label, info)
+        writer = csv.writer(self._file)
+        writer.writerow(info.info_list)
 
     def find(self, speciality: SpecialityOnPage):
         return str(speciality.year) + speciality.name in self.dict
 
-    def __del__(self):
-        self.file.close()
+
+class CategoryFile(InfoFile):
+    # format: year, speciality.name, category.name, url
+
+    def __init__(self, file_name):
+        self._file = open(file_name, 'a', newline='')  # Only append
+
+    def add_list(self, category_info_list):
+        writer = csv.writer(self._file)
+        writer.writerows(category_info_list)
 
 
 WEBSITE = 'http://electsys.sjtu.edu.cn/edu/pyjh/pyjhQueryNew.aspx'
 LOCAL_WEBSITE = 'file:///C:/Users/C/PycharmProjects/CoursesAnalysis/jspyjh_2016.html'
+root_folder = 'files\\'
 
-state_dict = StateDict('files\state.txt')
-category_file = open('files\category.txt', 'a')
 
-primal_driver = Driver(WEBSITE)
+def write_speciality_table(table: SpecialityTable):
+    file_name = root_folder + str(table.year) + '-speciality-table' + '.csv'
+    with open(file_name, 'w', newline='') as file:
+        writer = csv.writer(file)
+        for speciality in table.list:
+            writer.writerow([speciality.name] + speciality.hierarchy)
+
+
+def write_course_list(speciality, category, course_str_list):
+    category_label = str(speciality.year) \
+                     + '-' + speciality.name \
+                     + '-' + category.name
+    file_name = root_folder + category_label + '.csv'
+    with open(file_name, 'w', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerows(course_str_list)
+
+
+def crawl_by_year(year: int):
+    type_str = '第一专业培养计划'
+
+    completion_info_file = SpecialityFile(root_folder + str(year) + '-speciality-completion-info.csv')
+    failure_info_file = SpecialityFile(root_folder + str(year) + '-speciality-failure-info.csv')
+    category_file = CategoryFile(root_folder + str(year) + '-category-list.csv')
+
+    """
+        Level：year
+        Task: get speciality list
+    """
+
+    driver = Driver(WEBSITE)
+    driver.query_by_name(type_str, str(year))
+    page = driver.get_page()  # with open('jspyjh.html', encoding='UTF-8') as file: page = file.read()
+
+    specialities = SpecialityTable(page, year)
+
+    print('Speciality List: (The number of specialities: ', len(specialities.list), ')')
+    for speciality in specialities.list:
+        print(speciality.name, ' ', speciality.hierarchy)
+    write_speciality_table(specialities)
+    # specialities.hierarchy_tree.dfs()
+    # specialities.hierarchy_tree.bfs()
+
+    i = 0  # TODO: delete after testing
+    for speciality in specialities.list:
+        i += 1
+        if i > 4:
+            continue
+
+        """
+            Level: speciality
+            Task: determine whether the speciality has been crawled
+        """
+
+        if not completion_info_file.find(speciality) and not failure_info_file.find(speciality):
+
+            t = threading.Thread(target=driver.click_data_and_go_forward, args=(speciality,))
+            t.setDaemon(True)
+            t.start()
+            t.join(10)
+
+            if driver.is_loaded_successfully:
+
+                crawl_by_speciality(category_file, completion_info_file, driver, speciality)
+
+            else:
+                # loading fails
+                print('Cannot get information: ', speciality.year, '-', speciality.name)
+                speciality_info = SpecialityInfo(speciality.year, speciality.name, '')
+                failure_info_file.add(speciality_info)
+
+                driver = Driver(WEBSITE)
+                driver.query_by_name(type_str, str(year))
+
+
+def crawl_by_speciality(category_file, completion_info_file, driver, speciality):
+
+    """
+        Task: get category list
+    """
+
+    page = driver.get_page()
+    speciality_info = SpecialityInfo(speciality.year, speciality.name, driver.get_url())
+    course_categories = CategoryList(page)
+    # for category in course_categories.list: print(category.name, ' ', category.href)
+    category_info_list = []
+    for category in course_categories.list:
+
+        """
+            Level: category
+            Task: get course list
+        """
+
+        driver.click_data_and_go_forward(category)
+        page = driver.get_page()
+        courses = CourseTable(page)
+
+        # print(courses.table.get_text())
+
+        if courses.course_str_list:
+            write_course_list(speciality, category, courses.course_str_list)
+
+            category_info = [str(speciality.year), speciality.name, category.name, driver.get_url()]
+            category_info_list.append(category_info)
+
+        driver.close_and_come_back()
+    # mark that the speciality is crawled
+    category_file.add_list(category_info_list)
+    completion_info_file.add(speciality_info)
+    driver.close_and_come_back()
+
 
 """
     默认层级：上海交通大学(SJTU)、第一专业(Major)、培养计划(Program) (忽略：第二专业(Minor))
@@ -424,85 +556,40 @@ primal_driver = Driver(WEBSITE)
     &pyid=[?]&pyxh=[?]&zypyxh=&zylx=[?]&mc=[专业][年度]级培养计划[课程类]课程
 """
 
-[program_type_options, enrollment_year_options] = primal_driver.get_type_and_year()
+"""
+    培养计划类型:
+        第一专业培养计划
+        第二专业培养计划
+    入学年度:
+        2019
+        2018
+        ...
+        2002
+        2001
+"""
 
-type_str = program_type_options[0]
 
-for i1 in [3]:
+def main():
+    # primal_driver = Driver(WEBSITE)
 
-    """
-        Level：year
-        Task: get speciality list
-    """
+    # [program_type_options, enrollment_year_options] = primal_driver.get_type_and_year()
 
-    year_str = enrollment_year_options[i1]
-    year = int(year_str)
-    primal_driver.query_by_name(type_str, year_str)
-    page = primal_driver.get_page()  # with open('jspyjh.html', encoding='UTF-8') as file: page = file.read()
+    # type_str = program_type_options[0]  # 第一专业
 
-    specialities = SpecialityTable(page, year)
+    # for i in range(2018, 2000, -1):
 
-    print('Speciality List: (The number of specialities: ', len(specialities.list), ')')
-    for speciality in specialities.list:
-        print(speciality.name, ' ', speciality.hierarchy)
-    # specialities.hierarchy_tree.dfs()
-    # specialities.hierarchy_tree.bfs()
+    threads = []
+    # TODO: delete after testing
+    for i in range(2016, 2014, -1):
+        t = threading.Thread(target=crawl_by_year, args=(i,))
+        t.start()
+        threads.append(t)
 
-    for i2 in range(4):
+    for t in threads:
+        t.join()
 
-        """
-            Level: speciality
-            Task: determine whether the speciality has been crawled
-        """
+    # web_driver.quit()
 
-        current_speciality: SpecialityOnPage = specialities.list[i2]
-        if not state_dict.find(current_speciality):
-            """
-                Task: get category list
-            """
-            primal_driver.click_data_and_go_forward(current_speciality)
-            page = primal_driver.get_page()
-            course_categories = CategoryList(page)
 
-            # for category in course_categories.list: print(category.name, ' ', category.href)
-            category_info_list = []
-            for category in course_categories.list:
-
-                """
-                    Level: category
-                    Task: get course list
-                """
-                category_label = str(current_speciality.year) \
-                                 + '-' + current_speciality.name \
-                                 + '-' + category.name
-                file_name = 'files\\' + category_label + '.csv'
-                primal_driver.click_data_and_go_forward(category)
-                page = primal_driver.get_page()
-
-                courses = CourseTable(page)
-
-                # print(courses.table.get_text())
-
-                if courses.course_str_list:
-                    with open(file_name, 'w', newline='') as file:
-                        writer = csv.writer(file)
-                        writer.writerows(courses.course_str_list)
-
-                    category_info = str(current_speciality.year) \
-                                    + ' ' + current_speciality.name \
-                                    + ' ' + category.name \
-                                    + ' ' + primal_driver.get_url() + '\n'
-                    category_info_list.append(category_info)
-
-                primal_driver.close_and_come_back()
-
-            category_file.writelines(category_info_list)
-            state_dict.add(current_speciality, primal_driver.get_url())
-
-            primal_driver.close_and_come_back()
-
-            # mark that the speciality is crawled
-
-# web_driver.quit()
-
-category_file.close()
+main()
+print('Done.')
